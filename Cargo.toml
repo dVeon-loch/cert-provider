@@ -1,0 +1,40 @@
+[package]
+name = "cert-provider"
+version = "0.1.0"
+edition = "2021"
+description = "ACME certificate provisioning for Rust servers"
+license = "MIT OR Apache-2.0"
+# repository = "https://github.com/dveon-loch/cert-provider"
+
+[features]
+default = []                             # No default provider – user must enable one
+tokio-acme = ["dep:tokio-rustls-acme", "dep:rustls-pemfile"]   # tokio-rustls-acme based impl
+rfc8555 = ["dep:acme-rfc8555", "dep:reqwest", "dep:rcgen", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]   # acme-rfc8555 impl with HTTP-01 solving
+
+[dependencies]
+# Core
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"                        
+rustls-pemfile = { version = "2", optional = true }
+
+# tokio-acme provider
+tokio-rustls-acme = { version = "0.9", optional = true }
+# (rustls is re-exported by tokio-rustls-acme, but we may need to write PEMs manually)
+
+# rfc8555 provider
+acme-rfc8555 = { version = "0.3", optional = true }
+reqwest = { version = "0.12", optional = true, features = ["json", "rustls-tls"] }
+rcgen = { version = "0.14", optional = true }               # for generating account keys
+hyper = { version = "1", optional = true, features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+http-body-util = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"                          # for testing with temporary directories
+
+[lib]
+name = "cert_provider"
+path = "src/lib.rs"
