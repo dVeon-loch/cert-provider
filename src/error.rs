@@ -58,17 +58,12 @@ pub enum Error {
     /// An error specific to the `tokio-rustls-acme` provider.
     #[cfg(feature = "tokio-acme")]
     #[error("tokio-rustls-acme error: {0}")]
-    TokioAcme(#[from] tokio_rustls_acme::AcmeError),
+    TokioAcme(#[from] tokio_rustls_acme::acme::AcmeError),
 
     /// An error originating from the `rustls` TLS library.
     #[cfg(feature = "tokio-acme")]
     #[error("rustls error: {0}")]
     Rustls(#[from] rustls::Error),
-
-    /// An error from the `acme-rfc8555` crate.
-    #[cfg(feature = "rfc8555")]
-    #[error("acme-rfc8555 error: {0}")]
-    AcmeRfc8555(#[from] acme_rfc8555::Error),
 
     /// A reqwest HTTP error (used in the rfc8555 provider).
     #[cfg(feature = "rfc8555")]

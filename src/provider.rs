@@ -1,4 +1,6 @@
+#[cfg(feature = "tokio-acme")]
 pub mod tokio_acme;
+#[cfg(feature = "rfc8555")]
 pub mod rfc8555;
 
 use async_trait::async_trait;
@@ -16,7 +18,7 @@ pub trait CertProvider: Send + Sync + 'static {
         self,
         cert_dir: PathBuf,
         domains: Option<Vec<String>>,
-    ) -> Result<BackgroundGuard, Error>;
+    ) -> Result<BackgroundGuard>;
 }
 
 /// Opaque handle – keep it alive for the process lifetime.

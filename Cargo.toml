@@ -15,7 +15,7 @@ rfc8555 = ["dep:acme-rfc8555", "dep:reqwest", "dep:rcgen", "dep:rustls-pemfile",
 # Core
 async-trait = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"                        
 rustls-pemfile = { version = "2", optional = true }
@@ -31,6 +31,7 @@ rcgen = { version = "0.14", optional = true }               # for generating acc
 hyper = { version = "1", optional = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
 http-body-util = { version = "0.1", optional = true }
+rustls = {version = "0.23.39", default-features = false}
 
 [dev-dependencies]
 tempfile = "3"                          # for testing with temporary directories
