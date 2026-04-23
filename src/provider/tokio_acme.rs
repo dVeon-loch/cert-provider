@@ -20,7 +20,7 @@ impl TokioAcmeProvider {
 #[async_trait]
 impl CertProvider for TokioAcmeProvider {
     async fn init(
-        self,
+        &mut self,
         cert_dir: PathBuf,
         domains: Option<Vec<String>>,
     ) -> Result<BackgroundGuard> {

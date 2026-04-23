@@ -25,7 +25,7 @@ impl AcmeRfc8555Provider {
 #[async_trait]
 impl CertProvider for AcmeRfc8555Provider {
     async fn init(
-        self,
+        &mut self,
         _cert_dir: PathBuf,
         domains: Option<Vec<String>>,
     ) -> Result<BackgroundGuard> {

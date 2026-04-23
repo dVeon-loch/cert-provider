@@ -15,7 +15,7 @@ pub trait CertProvider: Send + Sync + 'static {
     /// `domains` – list of domains to request (e.g. `["example.com"]`); `None` = default.
     /// Returns a `BackgroundGuard` that stops renewal on drop.
     async fn init(
-        self,
+        &mut self,
         cert_dir: PathBuf,
         domains: Option<Vec<String>>,
     ) -> Result<BackgroundGuard>;
