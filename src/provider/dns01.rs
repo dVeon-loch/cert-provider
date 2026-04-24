@@ -95,6 +95,7 @@ struct BunnyRecord {
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct BunnyZoneDetail {
+    #[serde(rename = "Records")]
     dns_records: Vec<BunnyRecord>,
 }
 
