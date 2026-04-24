@@ -37,7 +37,7 @@ rustls = {version = "0.23.39", default-features = false}
 
 # dns01 provider
 instant-acme = { version = "0.8", optional = true, default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
-hyper-rustls = { version = "0.27", optional = true, features = ["webpki-tokio"] }
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["webpki-tokio"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 x509-parser = { version = "0.17", optional = true, default-features = false }
