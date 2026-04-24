@@ -4,6 +4,8 @@ pub mod tokio_acme;
 pub mod rfc8555;
 #[cfg(feature = "dns01")]
 pub mod dns01;
+#[cfg(feature = "s3-sync")]
+pub mod s3;
 
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -25,7 +27,7 @@ pub trait CertProvider: Send + Sync + 'static {
 
 /// Opaque handle – keep it alive for the process lifetime.
 pub struct BackgroundGuard {
-    cancel: CancellationToken,
+    pub(crate) cancel: CancellationToken,
 }
 
 impl BackgroundGuard {

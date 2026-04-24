@@ -12,6 +12,7 @@ The crate guarantees that valid certificate and key files are present in a given
   - `tokio-acme` – backed by [`tokio-rustls-acme`], uses `TLS-ALPN-01` challenges. Requires port 443 to be publicly reachable.
   - `rfc8555` – backed by [`acme-rfc8555`], uses `HTTP-01` challenges. Requires port 80 to be publicly reachable.
   - `dns01` – backed by [`instant-acme`], uses `DNS-01` challenges. Requires DNS API access (bring your own DNS provider impl).
+- **S3 / R2 sync** (optional `s3-sync` feature) – pull certs from S3-compatible storage on startup, push after issuance, and periodically upload renewed certs.
 - **Uniform API** – all backends implement the `CertProvider` trait.
 - **Persistent caching** – ACME account keys and certs survive restarts, avoiding rate-limit issues.
 - **Background renewal** – a spawned task renews certificates automatically before expiry.
@@ -28,6 +29,8 @@ cert-provider = { version = "0.1", features = ["tokio-acme"] }
 cert-provider = { version = "0.1", features = ["rfc8555"] }
 # or
 cert-provider = { version = "0.1", features = ["dns01"] }
+# or (with S3 sync)
+cert-provider = { version = "0.1", features = ["dns01", "s3-sync"] }
 ```
 
 ---
@@ -264,6 +267,113 @@ primary_region = "sjc"
 
 ---
 
+## S3 / R2 Sync (`s3-sync` feature)
+
+The `s3-sync` feature enables pulling certificates from S3-compatible storage (AWS S3, Cloudflare R2, MinIO, etc.) before ACME issuance, pushing after issuance, and keeping renewed certs synced.
+
+### API
+
+Two layers are provided:
+
+**Low-level** – `S3CertSync` for direct pull/push control:
+
+```rust
+use cert_provider::s3_sync::{S3CertSync, S3Config};
+
+let sync = S3CertSync::new(S3Config {
+    bucket_name: env("CERT_S3_BUCKET"),
+    endpoint:    env("CERT_S3_ENDPOINT"),
+    access_key:  env("CERT_S3_ACCESS_KEY"),
+    secret_key:  env("CERT_S3_SECRET_KEY"),
+    region:      None,                          // "auto" when None
+    prefix:      Some("certs".into()),          // optional key prefix
+})?;
+
+sync.pull_to(&cert_dir).await?;   // download fullchain.pem + privkey.pem
+sync.push_from(&cert_dir).await?; // upload fullchain.pem + privkey.pem
+
+// Periodic background sync for renewals:
+let _bg = sync.start_background_sync(cert_dir, Duration::from_secs(300));
+```
+
+**High-level wrapper** – `S3CertProvider<C>` decorates any `CertProvider`:
+
+```rust
+use cert_provider::S3CertProvider;
+use cert_provider::s3_sync::{S3CertSync, S3Config};
+
+let sync = S3CertSync::new(s3_config)?;
+let mut provider = S3CertProvider::new(
+    DnsAcmeProvider::new(email, dns).production(),
+    sync,
+)
+.sync_interval(Duration::from_secs(300));  // default: 5 min
+
+let _guard = provider.init(cert_dir, Some(domains)).await?;
+// On init:
+//   1. pull certs from S3 (if they exist)
+//   2. run ACME issuance (skipped if certs are already on disk)
+//   3. push certs to S3
+//   4. spawn periodic background sync for renewals
+// On drop: background sync and ACME renewal are both cancelled.
+```
+
+### Environment variable helper
+
+```rust
+use cert_provider::s3_sync::env_config;
+
+let s3_config = env_config(); // reads CERT_S3_* vars
+```
+
+| Env var | Field |
+|---------|-------|
+| `CERT_S3_BUCKET` | bucket name |
+| `CERT_S3_ENDPOINT` | S3-compatible endpoint URL |
+| `CERT_S3_ACCESS_KEY` | access key |
+| `CERT_S3_SECRET_KEY` | secret key |
+| `CERT_S3_REGION` | region (optional) |
+| `CERT_S3_PREFIX` | key prefix (optional) |
+
+### S3 key convention
+
+Cert files are stored at `{prefix}/fullchain.pem` and `{prefix}/privkey.pem`. Simple and predictable for manual inspection or access from other tools.
+
+### Usage with ws-echo example
+
+Using `S3CertProvider` to wrap a `DnsAcmeProvider`:
+
+```rust
+use cert_provider::S3CertProvider;
+use cert_provider::provider::dns01::{BunnyDns, DnsAcmeProvider};
+use cert_provider::s3_sync::{S3CertSync, S3Config};
+
+let s3_config = S3Config {
+    bucket_name: std::env::var("CERT_S3_BUCKET")
+        .expect("CERT_S3_BUCKET must be set"),
+    endpoint: std::env::var("CERT_S3_ENDPOINT")
+        .expect("CERT_S3_ENDPOINT must be set"),
+    access_key: std::env::var("CERT_S3_ACCESS_KEY")
+        .expect("CERT_S3_ACCESS_KEY must be set"),
+    secret_key: std::env::var("CERT_S3_SECRET_KEY")
+        .expect("CERT_S3_SECRET_KEY must be set"),
+    region: std::env::var("CERT_S3_REGION").ok(),
+    prefix: Some("ws-echo".into()),
+};
+
+let dns = BunnyDns::new(std::env::var("BUNNY_API_KEY")?);
+let mut provider = S3CertProvider::new(
+    DnsAcmeProvider::new("admin@example.com", dns)
+        .production(),
+    S3CertSync::new(s3_config)?,
+);
+
+let _cert_guard = provider.init(cert_dir, Some(domains)).await?;
+// certs are now on disk AND in S3; renewals sync back automatically
+```
+
+---
+
 ## File Layout
 
 After a successful `init`, `cert_dir` will contain:
@@ -297,6 +407,16 @@ pub trait CertProvider: Send + Sync + 'static {
 | `cert_dir` | Writable directory where `fullchain.pem` and `privkey.pem` are written. |
 | `domains` | SANs to request (e.g. `["example.com", "www.example.com"]`). `None` returns an error. |
 | Returns | `BackgroundGuard` – cancel-on-drop handle. Keep alive for the process lifetime. |
+
+### `S3CertProvider<C>` (feature `s3-sync`)
+
+A decorator that wraps any `CertProvider` to sync cert files to/from S3.
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `new(inner, sync)` | – | Wrap an ACME provider with an `S3CertSync`. |
+| `from_arc(inner, arc_sync)` | – | Wrap with a shared `Arc<S3CertSync>`. |
+| `.sync_interval(dur)` | 5 min | How often to upload renewed certs to S3. |
 
 ### Builder methods (`TokioAcmeProvider`)
 

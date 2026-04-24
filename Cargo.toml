@@ -11,6 +11,7 @@ default = []                             # No default provider – user must ena
 tokio-acme = ["dep:tokio-rustls-acme", "dep:rustls-pemfile", "dep:futures"]   # tokio-rustls-acme based impl
 rfc8555 = ["dep:acme-rfc8555", "dep:reqwest", "dep:rcgen", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]   # acme-rfc8555 impl with HTTP-01 solving
 dns01 = ["dep:instant-acme", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:rcgen", "dep:x509-parser", "dep:hyper-rustls", "dep:hyper-util", "dep:bytes"]   # DNS-01 challenge provider (bring-your-own DNS)
+s3-sync = ["dep:rust-s3", "dep:aws-creds", "dep:aws-region"]                   # S3 / R2 sync support for cert persistence
 
 [dependencies]
 # Core
@@ -42,6 +43,11 @@ serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 x509-parser = { version = "0.17", optional = true, default-features = false }
 bytes = { version = "1", optional = true }
+
+# S3 sync support
+rust-s3 = { version = "0.37", optional = true }
+aws-creds = { version = "0.39", optional = true }
+aws-region = { version = "0.28", optional = true }
 
 [dev-dependencies]
 tempfile = "3"                          # for testing with temporary directories

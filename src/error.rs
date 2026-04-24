@@ -80,12 +80,31 @@ pub enum Error {
     #[error("hyper error: {0}")]
     Hyper(#[from] hyper::Error),
 
+    /// An S3 storage error.
+    #[cfg(feature = "s3-sync")]
+    #[error("S3 error: {0}")]
+    S3(String),
+
     /// An internal cancellation or shutdown signal.
     #[error("Provider cancelled")]
     Cancelled,
 }
 
 // Manual From impls for stringly-typed errors we need to coerce.
+#[cfg(feature = "s3-sync")]
+impl From<awscreds::error::CredentialsError> for Error {
+    fn from(e: awscreds::error::CredentialsError) -> Self {
+        Error::S3(e.to_string())
+    }
+}
+
+#[cfg(feature = "s3-sync")]
+impl From<s3::error::S3Error> for Error {
+    fn from(e: s3::error::S3Error) -> Self {
+        Error::S3(e.to_string())
+    }
+}
+
 impl From<&str> for Error {
     fn from(s: &str) -> Self {
         Error::Config(s.to_owned())
