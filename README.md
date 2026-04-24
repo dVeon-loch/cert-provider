@@ -1,32 +1,33 @@
 # cert-provider
 
-`cert-provider` is a Rust library crate that provides a unified, async interface for automatic TLS certificate provisioning and renewal using the ACME protocol. It abstracts over two popular ACME backends, allowing you to embed “certbot-like” functionality entirely within your application.
+`cert-provider` is a Rust library crate that provides a unified, async interface for automatic TLS certificate provisioning and renewal using the ACME protocol. It abstracts over two popular ACME backends, allowing you to embed "certbot-like" functionality entirely within your application.
 
-The crate guarantees that valid certificate and key files are present in a given directory before your TLS server starts, and it keeps them renewed for as long as you hold onto the returned guard.
+The crate guarantees that valid certificate and key files are present in a given directory before your TLS server starts, and keeps them renewed for as long as you hold onto the returned guard.
 
 ---
 
 ## Features
 
-- **Two backends** (selectable via Cargo features):
-  - `tokio-acme` – uses [`tokio-rustls-acme`], a deeply integrated, high‑level provider that handles everything inside the TLS stack and uses `TLS-ALPN-01` challenges.
-  - `rfc8555` – uses [`acme-rfc8555`], a more explicit ACME client that gives you full control; the implementation uses `HTTP-01` challenges.
-- **Uniform API** – both backends implement the `CertProvider` trait, so swapping them is a one‑line change.
-- **Persistent caching** – ACME account keys and orders survive restarts, avoiding rate‑limit issues.
-- **Background renewal** – a spawned task automatically renews certificates well before expiry.
-- **Minimal intrusion** – you still own your TLS server; the crate only writes the PEM files and returns a guard handle.
+- **Three backends** (selectable via Cargo features):
+  - `tokio-acme` – backed by [`tokio-rustls-acme`], uses `TLS-ALPN-01` challenges. Requires port 443 to be publicly reachable.
+  - `rfc8555` – backed by [`acme-rfc8555`], uses `HTTP-01` challenges. Requires port 80 to be publicly reachable.
+  - `dns01` – backed by [`instant-acme`], uses `DNS-01` challenges. Requires DNS API access (bring your own DNS provider impl).
+- **Uniform API** – all backends implement the `CertProvider` trait.
+- **Persistent caching** – ACME account keys and certs survive restarts, avoiding rate-limit issues.
+- **Background renewal** – a spawned task renews certificates automatically before expiry.
+- **Minimal intrusion** – you own your TLS server; this crate only writes PEM files and returns a guard.
 
 ---
 
 ## Installation
-
-Add `cert-provider` to your `Cargo.toml`, enabling the feature for the backend you want:
 
 ```toml
 [dependencies]
 cert-provider = { version = "0.1", features = ["tokio-acme"] }
 # or
 cert-provider = { version = "0.1", features = ["rfc8555"] }
+# or
+cert-provider = { version = "0.1", features = ["dns01"] }
 ```
 
 ---
@@ -34,153 +35,282 @@ cert-provider = { version = "0.1", features = ["rfc8555"] }
 ## Quick Start
 
 ```rust
-use cert_provider::CertProvider;
-use cert_provider::providers::tokio_acme::TokioAcmeProvider; // or rfc8555::AcmeRfc8555Provider
+use std::path::PathBuf;
+use cert_provider::provider::CertProvider;
+use cert_provider::provider::tokio_acme::TokioAcmeProvider;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Choose a provider (here the all‑in‑one tokio-acme variant).
-    let provider: Box<dyn CertProvider> = Box::new(TokioAcmeProvider::new("admin@example.com"));
+    let mut provider: Box<dyn CertProvider> = Box::new(
+        TokioAcmeProvider::new("admin@example.com")
+            .production()          // omit during testing to use LE staging
+            .with_port(443),       // must be publicly reachable from Let's Encrypt
+    );
 
-    // 2. Initialize. This writes fullchain.pem and privkey.pem into `/etc/certs`.
-    //    The guard keeps background renewal alive.
+    // Blocks until fullchain.pem and privkey.pem are written to cert_dir.
+    // On first run this takes ~10-30 s for ACME issuance.
+    // On subsequent runs the cached cert loads in milliseconds.
     let _guard = provider.init(
-        "/etc/certs".into(),
+        PathBuf::from("/data/certs"),
         Some(vec!["myapp.example.com".into()]),
     ).await?;
 
-    // 3. Load the PEM files and configure your TLS server (rustls, etc.).
-    //    Your server can now start, knowing the cert is ready.
-    // ...
-
-    // 4. Keep the guard alive for the process lifetime (it cancels renewal on drop).
-    println!("Certificate ready, starting server...");
-    // ... run your server indefinitely ...
-    Ok(())
+    // Load the PEM files and start your TLS server.
+    // Keep _guard alive for the process lifetime – dropping it stops renewal.
+    run_server("/data/certs").await
 }
 ```
-
-The `init` method blocks until a valid certificate is obtained, so you can safely start your TLS server immediately after it returns.
 
 ---
 
 ## Provider Details & Port Requirements
 
-Both backends require your application to be reachable on certain ports for ACME challenge validation. The exact requirements depend on the provider and your deployment environment.
+### `tokio-acme` — TLS-ALPN-01
 
-### `tokio-acme` (feature `tokio-acme`)
-- **Challenge type:** `TLS-ALPN-01`.
-- **How it works:** During initial issuance, the library binds a **temporary loopback listener** and completes a self‑TLS handshake to trigger the ACME flow. No additional external port is needed aside from the main HTTPS port (443).
-- **Deployment:** You only need to expose port 443. The library obtains the certificate using ALPN directly on your TLS server when a real client connects, but the crate’s `init` uses the loopback trick to get the first certificate *before* your server starts. No separate HTTP port is required.
+- **How it works:** The provider binds a TCP listener on `port` (default `443`) and serves TLS-ALPN-01 challenge responses. Let's Encrypt connects to your domain on **port 443** to validate ownership. Once validated, the certificate is written to `cert_dir` and the listener stays alive in the background for renewals.
+- **Required external port:** `443` must be publicly reachable.
+- **App TLS port:** Your application's TLS server must bind on a **separate** port (e.g., `8080`) using the cert files written by this provider. The provider holds port 443 for ACME.
 
-### `rfc8555` (feature `rfc8555`)
-- **Challenge type:** `HTTP-01`.
-- **How it works:** The provider starts a **temporary HTTP server on port 80** (configurable) to answer ACME challenges. The Let's Encrypt validation server must be able to reach your app on port 80.
-- **Deployment:** You must expose port **80** in addition to 443. The HTTP server only runs during initial certificate acquisition and periodically during renewal (a few seconds). It automatically shuts down afterwards.
+```rust
+let mut provider = TokioAcmeProvider::new("admin@example.com")
+    .production()
+    .with_port(443);   // cert-provider occupies this port
 
-> **Note:** You can use the `LETS_ENCRYPT_STAGING` URL during development to avoid rate limits. Both providers offer a staging constructor (e.g., `AcmeRfc8555Provider::staging(...)`).
+let _guard = provider.init(cert_dir.clone(), Some(domains)).await?;
+
+// Now start your TLS server on a different port using the written cert files.
+let tls_listener = TcpListener::bind("0.0.0.0:8080").await?;
+```
+
+### `rfc8555` — HTTP-01
+
+- **How it works:** The provider starts a temporary HTTP server on port 80 to answer ACME challenges, then shuts it down after the certificate is issued. The certificate is written to `cert_dir`.
+- **Required external port:** `80` must be publicly reachable during issuance and renewal.
+- **App TLS port:** Your application's TLS server can bind on any port (typically `443`) independently.
+
+> **Staging:** The default constructor for both providers uses the Let's Encrypt **staging** environment. Call `.production()` only when deploying for real. Staging certs are not browser-trusted but are subject to much looser rate limits.
 
 ---
 
 ## Deployment on Fly.io (TCP passthrough)
 
-Because `cert-provider` terminates TLS itself, you must configure Fly to forward raw TCP to your app, without any TLS termination by the edge proxy. The following `fly.toml` examples show how to open the required ports.
+Because `cert-provider` handles TLS itself, Fly must forward raw TCP to your app without terminating TLS at the edge. Set `handlers = []` on the relevant service ports.
 
-### For `tokio-acme` (only port 443 needed)
+> **Custom domain required.** `*.fly.dev` subdomains are not valid for Let's Encrypt certificate issuance via TCP passthrough. Allocate a dedicated IPv4 (`fly ips allocate-v4`) and point your custom domain's A record at it.
+
+### `tokio-acme` – ACME on 443, app on a separate port
+
+The provider occupies port 443 for TLS-ALPN-01 validation. The app TLS server runs on a separate internal port (here `8080`) and loads the cert files written by the provider.
 
 ```toml
-app = "myapp"
+# fly.toml
 
-[build]
-  image = "."
+app = "my-app"
+primary_region = "lhr"
 
+# ── ACME TLS-ALPN-01 listener (cert-provider) ─────────────────────────────────
+# Let's Encrypt validates your domain by connecting here.
+# Must stay alive (min_machines_running = 1) so renewals work.
 [[services]]
-  internal_port = 443
-  protocol = "tcp"
-  auto_stop_machines = "stop"
-  auto_start_machines = true
+  internal_port = 443            # matches TokioAcmeProvider::with_port(443)
+  protocol      = "tcp"
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
   min_machines_running = 1
 
   [[services.ports]]
-    port = 443
-    handlers = []          # raw TCP, no TLS termination
+    port     = 443
+    handlers = []                # raw TCP – no Fly TLS termination
+
+# ── App TLS server (your application) ─────────────────────────────────────────
+# Loads fullchain.pem / privkey.pem written by cert-provider.
+[[services]]
+  internal_port = 8080           # your app binds here
+  protocol      = "tcp"
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+
+  [[services.ports]]
+    port     = 8080
+    handlers = []                # raw TCP passthrough; app does its own TLS
 ```
 
-Your Rust application must listen on `0.0.0.0:443` (or another port mapped via `internal_port`). The `cert-provider` init will handle obtaining the certificate using the loopback trick – no special port 80 is required.
+Corresponding Rust setup:
 
-### For `rfc8555` (ports 80 and 443)
+```rust
+// cert-provider occupies port 443 for ACME.
+let mut provider = TokioAcmeProvider::new("admin@example.com")
+    .production()
+    .with_port(443);
+
+let _guard = provider.init(
+    PathBuf::from("/data/certs"),
+    Some(vec!["myapp.example.com".into()]),
+).await?;
+
+// App TLS server on port 8080 using cert files.
+let certs  = load_certs("/data/certs/fullchain.pem")?;
+let key    = load_key("/data/certs/privkey.pem")?;
+let tls_config = ServerConfig::builder()
+    .with_no_client_auth()
+    .with_single_cert(certs, key)?;
+let listener = TcpListener::bind("0.0.0.0:8080").await?;
+// ... accept and handle TLS connections
+```
+
+### `rfc8555` – HTTP-01 challenge, app TLS on 443
+
+HTTP-01 only needs port 80 for validation, so the app's TLS server can run on the standard port 443 independently.
 
 ```toml
-app = "myapp"
+# fly.toml
 
+app = "my-app"
+primary_region = "lhr"
+
+# ── App TLS server (your application) ─────────────────────────────────────────
 [[services]]
   internal_port = 443
-  protocol = "tcp"
-  auto_stop_machines = "stop"
-  auto_start_machines = true
+  protocol      = "tcp"
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
   min_machines_running = 1
 
   [[services.ports]]
-    port = 443
+    port     = 443
     handlers = []
 
+# ── HTTP-01 ACME challenge server (cert-provider) ─────────────────────────────
+# Only active during issuance and renewal. Must be publicly reachable.
 [[services]]
   internal_port = 80
-  protocol = "tcp"
-  auto_stop_machines = "stop"
+  protocol      = "tcp"
+  auto_stop_machines  = "stop"
   auto_start_machines = true
-  min_machines_running = 1
 
   [[services.ports]]
-    port = 80
+    port     = 80
     handlers = []
 ```
 
-Your application must listen on both ports: `0.0.0.0:443` for your main TLS server and `0.0.0.0:80` for the temporary ACME HTTP challenge server (which the `rfc8555` provider will bind).
+### `dns01` – DNS-01 challenge, bring-your-own DNS provider
 
-> **Important:** Because you are bypassing Fly’s edge, you must **own a custom domain** (not `*.fly.dev`) to provision Let's Encrypt certificates – the `*.fly.dev` wildcard is only available through Fly's built‑in HTTP proxy. Point your custom domain’s DNS to your Fly app’s IPv4/IPv6 address.
+DNS-01 uses domain control via DNS TXT records. Useful when you cannot expose port 443 or 80 (e.g., shared hosting, Fly.io without dedicated IPv4). Requires programmatic access to your DNS provider.
+
+The `dns01` feature requires you to implement the `DnsProvider` trait (add TXT / remove TXT records). A ready-made `BunnyDns` implementation for bunny.net DNS is included.
+
+```rust
+use std::path::PathBuf;
+use cert_provider::provider::CertProvider;
+use cert_provider::provider::dns01::{DnsAcmeProvider, BunnyDns};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dns = BunnyDns::new(std::env::var("BUNNY_API_KEY")?);
+    let mut provider = DnsAcmeProvider::new("admin@example.com", dns)
+        .production()
+        .propagation_secs(90);   // adjust for your DNS provider's TTL
+
+    let _guard = provider.init(
+        PathBuf::from("/data/certs"),
+        Some(vec!["myapp.example.com".into()]),
+    ).await?;
+
+    // App TLS server runs on any port (typically 443 or 8080)
+    run_server("/data/certs").await
+}
+```
+
+**Bring your own DNS provider:**
+
+```rust
+use async_trait::async_trait;
+use cert_provider::provider::dns01::DnsProvider;
+
+struct MyDnsProvider { /* ... */ }
+
+#[async_trait]
+impl DnsProvider for MyDnsProvider {
+    async fn add_txt_record(&self, fqdn: &str, value: &str) -> Result<()> {
+        // POST TXT record to your DNS API
+        Ok(())
+    }
+
+    async fn remove_txt_record(&self, fqdn: &str, value: &str) -> Result<()> {
+        // DELETE TXT record from your DNS API
+        Ok(())
+    }
+}
+```
+
+On fly.io, DNS-01 doesn't require a dedicated IPv4 – it works with shared IPs via your custom domain's DNS:
+
+```toml
+# fly.toml – DNS-01 does not require port 443 listener
+
+app = "my-app"
+primary_region = "sjc"
+
+[[services]]
+  internal_port = 443
+  protocol      = "tcp"
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
+
+  [[services.ports]]
+    port     = 443
+    handlers = []
+```
 
 ---
 
 ## File Layout
 
-After a successful `init`, the `cert_dir` will contain:
+After a successful `init`, `cert_dir` will contain:
 
 ```
-/etc/certs/
-├── fullchain.pem          # certificate chain
-├── privkey.pem            # private key
-└── cache/                 # persistent ACME account & order data (do not delete)
+/data/certs/
+├── fullchain.pem        # certificate chain (leaf + intermediates)
+├── privkey.pem          # private key
+└── acme_cache/          # ACME account keys and cached cert – do not delete
 ```
 
-Your application can simply load these files and pass them to `rustls::ServerConfig` or any TLS library that accepts PEM-encoded certificates.
+Pass `fullchain.pem` and `privkey.pem` to `rustls::ServerConfig`, `tokio-rustls`, or any TLS library that accepts PEM files.
 
 ---
 
 ## API Reference
 
-The main trait lives in `cert_provider::CertProvider`:
-
 ```rust
 #[async_trait]
 pub trait CertProvider: Send + Sync + 'static {
     async fn init(
-        self: Box<Self>,
+        &mut self,
         cert_dir: PathBuf,
         domains: Option<Vec<String>>,
-    ) -> Result<BackgroundGuard, Error>;
+    ) -> Result<BackgroundGuard>;
 }
 ```
 
-- `cert_dir` – writable directory where `fullchain.pem` and `privkey.pem` will be stored.
-- `domains` – list of SANs for the certificate (e.g., `["example.com", "www.example.com"]`). `None` will cause an error – this is a mandatory parameter.
-- Returns `BackgroundGuard` – a handle that cancels the background renewal task when dropped. Keep it alive for the duration of your process.
+| Parameter | Description |
+|-----------|-------------|
+| `cert_dir` | Writable directory where `fullchain.pem` and `privkey.pem` are written. |
+| `domains` | SANs to request (e.g. `["example.com", "www.example.com"]`). `None` returns an error. |
+| Returns | `BackgroundGuard` – cancel-on-drop handle. Keep alive for the process lifetime. |
+
+### Builder methods (`TokioAcmeProvider`)
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `new(email)` | – | Staging environment, port 443. |
+| `.production()` | staging | Switch to Let's Encrypt production. |
+| `.with_port(u16)` | `443` | Internal port the ACME listener binds. Must match `internal_port` in `fly.toml`. |
 
 ---
 
 ## Error Handling
 
-All errors are instances of `cert_provider::Error`, a non‑exhaustive enum that captures common failure modes (`Io`, `AcmeProtocol`, `Challenge`, `Config`, etc.). You can match on these variants or convert them to your application’s error type.
+All errors are `cert_provider::Error` variants: `Io`, `AcmeProtocol`, `Challenge`, `Config`, etc. The `Challenge` variant is returned when `init` times out waiting for Let's Encrypt to validate (default timeout: 5 minutes). Common causes: port not publicly reachable, DNS not pointing to the server, or firewall blocking inbound connections.
 
 ---
 
@@ -192,3 +322,4 @@ Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at y
 
 [`tokio-rustls-acme`]: https://crates.io/crates/tokio-rustls-acme
 [`acme-rfc8555`]: https://crates.io/crates/acme-rfc8555
+[`instant-acme`]: https://crates.io/crates/instant-acme

@@ -2,6 +2,8 @@
 pub mod tokio_acme;
 #[cfg(feature = "rfc8555")]
 pub mod rfc8555;
+#[cfg(feature = "dns01")]
+pub mod dns01;
 
 use async_trait::async_trait;
 use std::path::PathBuf;
