@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 default = []                             # No default provider – user must enable one
 tokio-acme = ["dep:tokio-rustls-acme", "dep:rustls-pemfile", "dep:futures"]   # tokio-rustls-acme based impl
 rfc8555 = ["dep:acme-rfc8555", "dep:reqwest", "dep:rcgen", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]   # acme-rfc8555 impl with HTTP-01 solving
-dns01 = ["dep:instant-acme", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:rcgen", "dep:x509-parser", "dep:hyper-rustls"]   # DNS-01 challenge provider (bring-your-own DNS)
+dns01 = ["dep:instant-acme", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:rcgen", "dep:x509-parser", "dep:hyper-rustls", "dep:hyper-util", "dep:bytes"]   # DNS-01 challenge provider (bring-your-own DNS)
 
 [dependencies]
 # Core
@@ -41,6 +41,7 @@ hyper-rustls = { version = "0.27", optional = true, default-features = false, fe
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 x509-parser = { version = "0.17", optional = true, default-features = false }
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"                          # for testing with temporary directories

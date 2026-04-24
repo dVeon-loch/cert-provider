@@ -3,9 +3,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client as HyperClient;
+use hyper_util::rt::TokioExecutor;
 use instant_acme::{
-    Account, AccountCredentials, ChallengeType, Identifier,
-    LetsEncrypt, NewAccount, NewOrder, RetryPolicy,
+    Account, AccountCredentials, BodyWrapper, ChallengeType, HttpClient,
+    Identifier, LetsEncrypt, NewAccount, NewOrder, RetryPolicy,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,24 @@ use crate::provider::{BackgroundGuard, CertProvider};
 
 const DEFAULT_PROPAGATION_SECS: u64 = 60;
 const DEFAULT_RENEW_WITHIN_DAYS: u64 = 30;
+
+// ---------------------------------------------------------------------------
+// Webpki-roots HTTP client (avoids system CA dependency)
+// ---------------------------------------------------------------------------
+
+fn make_http_client() -> Result<Box<dyn HttpClient>> {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_only()
+        .enable_http1()
+        .enable_http2()
+        .build();
+
+    let client: HyperClient<_, BodyWrapper<bytes::Bytes>> =
+        HyperClient::builder(TokioExecutor::new()).build(connector);
+
+    Ok(Box::new(client))
+}
 
 // ---------------------------------------------------------------------------
 // DnsProvider trait
@@ -252,8 +273,8 @@ async fn load_or_create_account(
     if creds_path.exists() {
         let json = tokio::fs::read_to_string(&creds_path).await?;
         if let Ok(cached) = serde_json::from_str::<CachedCredentials>(&json) {
-            let builder = Account::builder()
-                .map_err(|e| Error::AcmeProtocol(e.to_string()))?;
+            let http = make_http_client()?;
+            let builder = Account::builder_with_http(http);
             match builder.from_credentials(cached.credentials).await {
                 Ok(account) => {
                     info!("Loaded ACME account from cache");
@@ -266,8 +287,8 @@ async fn load_or_create_account(
         }
     }
 
-    let builder = Account::builder()
-        .map_err(|e| Error::AcmeProtocol(e.to_string()))?;
+    let http = make_http_client()?;
+    let builder = Account::builder_with_http(http);
 
     let contact = format!("mailto:{email}");
     let server = if production {

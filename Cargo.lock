@@ -191,6 +191,7 @@ version = "0.1.0"
 dependencies = [
  "acme-rfc8555",
  "async-trait",
+ "bytes",
  "futures",
  "http-body-util",
  "hyper",
