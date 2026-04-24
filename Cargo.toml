@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 default = []                             # No default provider – user must enable one
 tokio-acme = ["dep:tokio-rustls-acme", "dep:rustls-pemfile", "dep:futures"]   # tokio-rustls-acme based impl
 rfc8555 = ["dep:acme-rfc8555", "dep:reqwest", "dep:rcgen", "dep:rustls-pemfile", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]   # acme-rfc8555 impl with HTTP-01 solving
-dns01 = ["dep:instant-acme", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:rcgen", "dep:x509-parser"]   # DNS-01 challenge provider (bring-your-own DNS)
+dns01 = ["dep:instant-acme", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:rcgen", "dep:x509-parser", "dep:hyper-rustls"]   # DNS-01 challenge provider (bring-your-own DNS)
 
 [dependencies]
 # Core
@@ -28,7 +28,7 @@ futures = { version = "0.3", optional = true }
 
 # rfc8555 provider
 acme-rfc8555 = { version = "0.3", optional = true }
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls", "rustls-tls-webpki-roots"] }
 rcgen = { version = "0.14", optional = true }
 hyper = { version = "1", optional = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
@@ -37,6 +37,7 @@ rustls = {version = "0.23.39", default-features = false}
 
 # dns01 provider
 instant-acme = { version = "0.8", optional = true, default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
+hyper-rustls = { version = "0.27", optional = true, features = ["webpki-tokio"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 x509-parser = { version = "0.17", optional = true, default-features = false }
