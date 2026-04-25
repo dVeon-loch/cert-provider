@@ -8,7 +8,7 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use instant_acme::{
     Account, AccountCredentials, BodyWrapper, ChallengeType, HttpClient,
-    Identifier, LetsEncrypt, NewAccount, NewOrder, RetryPolicy,
+    Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use serde::{Deserialize, Serialize};
@@ -441,10 +441,30 @@ async fn issue_certificate<D: DnsProvider>(
 
     // Poll until order ready
     let retry_policy = RetryPolicy::default();
-    order
+    let order_status = order
         .poll_ready(&retry_policy)
         .await
         .map_err(|e| Error::AcmeProtocol(e.to_string()))?;
+
+    if order_status != OrderStatus::Ready {
+        // Best-effort cleanup of TXT records before returning the error
+        for ci in &challenge_info {
+            if let Err(e) = dns.remove_txt_record(&ci.fqdn, &ci.dns_value).await {
+                warn!("Failed to remove TXT record {}: {e}", ci.fqdn);
+            }
+        }
+
+        let error_details = order
+            .state()
+            .error
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "ACME server did not provide additional details".to_string());
+
+        return Err(Error::Challenge(format!(
+            "DNS-01 challenge validation failed: {error_details}"
+        )));
+    }
 
     // Finalize: generate CSR and submit
     let (csr_der, key_pem) = generate_csr(domains)?;
@@ -494,7 +514,8 @@ async fn issue_certificate<D: DnsProvider>(
 /// let dns = BunnyDns::new(std::env::var("BUNNY_API_KEY").unwrap());
 /// let mut provider = DnsAcmeProvider::new("admin@example.com", dns)
 ///     .production()
-///     .propagation_secs(90);
+///     .propagation_secs(90)
+///     .max_retries(3);
 ///
 /// let _guard = provider.init(cert_dir, Some(domains)).await?;
 /// ```
@@ -504,6 +525,7 @@ pub struct DnsAcmeProvider<D: DnsProvider> {
     production: bool,
     propagation_secs: u64,
     renew_within_days: u64,
+    max_retries: u32,
 }
 
 impl<D: DnsProvider> DnsAcmeProvider<D> {
@@ -518,6 +540,7 @@ impl<D: DnsProvider> DnsAcmeProvider<D> {
             production: false,
             propagation_secs: DEFAULT_PROPAGATION_SECS,
             renew_within_days: DEFAULT_RENEW_WITHIN_DAYS,
+            max_retries: 0,
         }
     }
 
@@ -529,6 +552,7 @@ impl<D: DnsProvider> DnsAcmeProvider<D> {
             production: false,
             propagation_secs: DEFAULT_PROPAGATION_SECS,
             renew_within_days: DEFAULT_RENEW_WITHIN_DAYS,
+            max_retries: 0,
         }
     }
 
@@ -549,6 +573,17 @@ impl<D: DnsProvider> DnsAcmeProvider<D> {
     /// Default: 30 days (Let's Encrypt certs are valid for 90 days).
     pub fn renew_within_days(mut self, days: u64) -> Self {
         self.renew_within_days = days;
+        self
+    }
+
+    /// How many times to retry the DNS-01 challenge if validation fails.
+    ///
+    /// Each retry re-creates the ACME order, adds TXT records, waits for
+    /// propagation, and asks Let's Encrypt to validate again. The wait
+    /// between retries is `propagation_secs * (retry_number + 1)`.
+    /// Default: 0 (no retries).
+    pub fn max_retries(mut self, n: u32) -> Self {
+        self.max_retries = n;
         self
     }
 }
@@ -575,14 +610,43 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
         // Issue cert if missing
         if !fullchain_path.exists() || !privkey_path.exists() {
             let account = load_or_create_account(&cache_dir, &self.contact_email, self.production).await?;
-            issue_certificate(
-                &self.dns,
-                &account,
-                &domains,
-                self.propagation_secs,
-                &cert_dir,
-            )
-            .await?;
+
+            let mut last_err = None;
+            let mut remaining = self.max_retries + 1; // at least one attempt
+            while remaining > 0 {
+                remaining -= 1;
+
+                match issue_certificate(
+                    &self.dns,
+                    &account,
+                    &domains,
+                    self.propagation_secs,
+                    &cert_dir,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(Error::Challenge(e)) if remaining > 0 => {
+                        let delay = self.propagation_secs * (self.max_retries - remaining + 1) as u64;
+                        warn!(
+                            "DNS-01 challenge failed ({e}), retrying in {delay}s ({remaining} retries left)"
+                        );
+                        last_err = Some(Error::Challenge(e));
+                        sleep(Duration::from_secs(delay)).await;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(e) = last_err {
+                return Err(e);
+            }
         } else {
             info!("Existing cert files found in {:?}", cert_dir);
         }
