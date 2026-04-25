@@ -20,6 +20,8 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::error::{Error, Result};
 use crate::provider::{BackgroundGuard, CertProvider};
+#[cfg(feature = "s3-sync")]
+use crate::s3_sync::S3CertSync;
 
 const DEFAULT_PROPAGATION_SECS: u64 = 60;
 const DEFAULT_RENEW_WITHIN_DAYS: u64 = 30;
@@ -555,6 +557,8 @@ pub struct DnsAcmeProvider<D: DnsProvider> {
     propagation_secs: u64,
     renew_within_days: u64,
     max_retries: u32,
+    #[cfg(feature = "s3-sync")]
+    s3_sync: Option<Arc<S3CertSync>>,
 }
 
 impl<D: DnsProvider> DnsAcmeProvider<D> {
@@ -570,6 +574,8 @@ impl<D: DnsProvider> DnsAcmeProvider<D> {
             propagation_secs: DEFAULT_PROPAGATION_SECS,
             renew_within_days: DEFAULT_RENEW_WITHIN_DAYS,
             max_retries: 0,
+            #[cfg(feature = "s3-sync")]
+            s3_sync: None,
         }
     }
 
@@ -582,7 +588,18 @@ impl<D: DnsProvider> DnsAcmeProvider<D> {
             propagation_secs: DEFAULT_PROPAGATION_SECS,
             renew_within_days: DEFAULT_RENEW_WITHIN_DAYS,
             max_retries: 0,
+            #[cfg(feature = "s3-sync")]
+            s3_sync: None,
         }
+    }
+
+    /// Attach an S3 sync handle so newly-created ACME account credentials
+    /// are persisted to S3 immediately, before the certificate issuance
+    /// retry loop begins.
+    #[cfg(feature = "s3-sync")]
+    pub fn with_s3_sync(mut self, s3_sync: Arc<S3CertSync>) -> Self {
+        self.s3_sync = Some(s3_sync);
+        self
     }
 
     /// Switch to the Let's Encrypt **production** directory.
@@ -639,6 +656,15 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
         // Issue cert if missing
         if !fullchain_path.exists() || !privkey_path.exists() {
             let account = load_or_create_account(&cache_dir, &self.contact_email, self.production).await?;
+
+            // Persist credentials to S3 immediately — don't wait for the
+            // retry loop to finish, or the account could be lost on crash.
+            #[cfg(feature = "s3-sync")]
+            if let Some(ref sync) = self.s3_sync {
+                if let Err(e) = sync.push_from(&cert_dir).await {
+                    tracing::warn!(error = %e, "Failed to push ACME credentials to S3");
+                }
+            }
 
             let mut last_err = None;
             let mut remaining = self.max_retries + 1; // at least one attempt
