@@ -7,8 +7,8 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use instant_acme::{
-    Account, AccountCredentials, BodyWrapper, ChallengeType, HttpClient,
-    Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
+    Account, AccountCredentials, AuthorizationStatus, BodyWrapper, ChallengeType,
+    HttpClient, Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use serde::{Deserialize, Serialize};
@@ -454,12 +454,41 @@ async fn issue_certificate<D: DnsProvider>(
             }
         }
 
-        let error_details = order
-            .state()
-            .error
-            .as_ref()
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "ACME server did not provide additional details".to_string());
+        // Prefer the order-level error detail, but if empty, probe individual
+        // authorizations for challenge-level error information.
+        let order_error = order.state().error.clone();
+        let error_details = if let Some(problem) = &order_error {
+            problem.to_string()
+        } else {
+            let mut authz_errors: Vec<String> = Vec::new();
+            let mut authorizations = order.authorizations();
+            while let Some(authz_result) = authorizations.next().await {
+                match authz_result {
+                    Ok(mut authz) => {
+                        if let Ok(state) = authz.refresh().await {
+                            if state.status == AuthorizationStatus::Invalid {
+                                for challenge in &state.challenges {
+                                    if let Some(ref err) = challenge.error {
+                                        authz_errors.push(format!(
+                                            "{}: {err}",
+                                            state.identifier(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => authz_errors.push(format!(
+                        "failed to query authorization state: {e}"
+                    )),
+                }
+            }
+            if authz_errors.is_empty() {
+                "ACME server did not provide additional details".to_string()
+            } else {
+                authz_errors.join("; ")
+            }
+        };
 
         return Err(Error::Challenge(format!(
             "DNS-01 challenge validation failed: {error_details}"
