@@ -51,8 +51,18 @@ impl<C: CertProvider> CertProvider for S3CertProvider<C> {
 
         self.s3_sync.pull_to(&cert_dir).await?;
 
-        let inner_guard = self.inner.init(cert_dir.clone(), domains).await?;
+        let init_result = self.inner.init(cert_dir.clone(), domains).await;
 
+        // Always push credentials to S3, even on failure, so the ACME
+        // account (`acme_cache/acme_account_credentials.json`) survives
+        // restarts.  Only files that actually exist are uploaded.
+        if let Err(e) = self.s3_sync.push_from(&cert_dir).await {
+            tracing::warn!(error = %e, "Failed to push cert files to S3");
+        }
+
+        let inner_guard = init_result?;
+
+        // A second push on the happy path — by now the cert PEMs exist too.
         self.s3_sync.push_from(&cert_dir).await?;
 
         let stop_token = CancellationToken::new();
