@@ -81,12 +81,19 @@ impl S3CertSync {
     }
 
     pub async fn pull_to(&self, cert_dir: &Path) -> Result<()> {
-        let filenames = ["fullchain.pem", "privkey.pem"];
+        let filenames = [
+            "fullchain.pem",
+            "privkey.pem",
+            "acme_cache/acme_account_credentials.json",
+        ];
         for name in &filenames {
             let s3_key = self.s3_key(name);
             match self.bucket.get_object(&s3_key).await {
                 Ok(content) => {
                     let path = cert_dir.join(name);
+                    if let Some(parent) = path.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
                     tokio::fs::write(&path, content.to_vec()).await?;
                     tracing::info!(path = %path.display(), "Downloaded cert file from S3");
                 }
@@ -99,7 +106,11 @@ impl S3CertSync {
     }
 
     pub async fn push_from(&self, cert_dir: &Path) -> Result<()> {
-        let filenames = ["fullchain.pem", "privkey.pem"];
+        let filenames = [
+            "fullchain.pem",
+            "privkey.pem",
+            "acme_cache/acme_account_credentials.json",
+        ];
         for name in &filenames {
             let path = cert_dir.join(name);
             if !path.exists() {
