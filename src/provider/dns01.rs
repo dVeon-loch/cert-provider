@@ -717,6 +717,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
         let production = self.production;
         let propagation_secs = self.propagation_secs;
         let bg_renew_within = Duration::from_secs(self.renew_within_days * 86400);
+        #[cfg(feature = "s3-sync")]
         let bg_s3_sync = self.s3_sync.clone();
 
         tokio::spawn(async move {

@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls_acme::{AccountCache, AcmeConfig, CertCache, caches::DirCache};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+
 
 use crate::error::{Error, Result};
 use crate::provider::{CertProvider, BackgroundGuard};

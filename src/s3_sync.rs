@@ -103,9 +103,9 @@ impl S3CertSync {
                     }
                     tokio::fs::write(&path, content.to_vec()).await?;
                     tracing::debug!(path = %path.display(), "Downloaded cert file from S3");
-                    if name == "fullchain.pem" {
+                    if *name == "fullchain.pem" {
                         result.fullchain_found = true;
-                    } else if name == "privkey.pem" {
+                    } else if *name == "privkey.pem" {
                         result.privkey_found = true;
                     }
                 }

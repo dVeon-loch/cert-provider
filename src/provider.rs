@@ -30,6 +30,7 @@ pub struct BackgroundGuard {
     pub(crate) cancel: CancellationToken,
 }
 
+#[allow(dead_code)]
 impl BackgroundGuard {
     pub(crate) fn new(cancel: CancellationToken) -> Self {
         Self { cancel }

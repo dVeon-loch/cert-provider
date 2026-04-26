@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
 use crate::provider::{CertProvider, BackgroundGuard};
