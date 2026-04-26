@@ -49,21 +49,26 @@ impl<C: CertProvider> CertProvider for S3CertProvider<C> {
     ) -> Result<BackgroundGuard> {
         tokio::fs::create_dir_all(&cert_dir).await?;
 
-        self.s3_sync.pull_to(&cert_dir).await?;
+        let pull_result = self.s3_sync.pull_to(&cert_dir).await?;
+        let certs_pulled_from_s3 = pull_result.fullchain_found && pull_result.privkey_found;
 
         let init_result = self.inner.init(cert_dir.clone(), domains).await;
 
-        // Always push credentials to S3, even on failure, so the ACME
-        // account (`acme_cache/acme_account_credentials.json`) survives
-        // restarts.  Only files that actually exist are uploaded.
-        if let Err(e) = self.s3_sync.push_from(&cert_dir).await {
-            tracing::warn!(error = %e, "Failed to push cert files to S3");
+        // Push credentials to S3 to ensure ACME account survives restarts.
+        // Only newly created credentials are pushed; cert files pulled from S3
+        // are not re-uploaded (redundant).
+        if let Err(e) = self.s3_sync.push_credentials_only(&cert_dir).await {
+            tracing::debug!(error = %e, "Failed to push credentials to S3");
         }
 
         let inner_guard = init_result?;
 
-        // A second push on the happy path — by now the cert PEMs exist too.
-        self.s3_sync.push_from(&cert_dir).await?;
+        // Push cert files only if they were newly created/issued, not if they were
+        // pulled from S3. If certs were in S3, they're already backed up. If certs
+        // are renewed later, the background loop will sync them.
+        if !certs_pulled_from_s3 {
+            self.s3_sync.push_from(&cert_dir).await?;
+        }
 
         let stop_token = CancellationToken::new();
         let bg_stop = stop_token.clone();
@@ -82,7 +87,7 @@ impl<C: CertProvider> CertProvider for S3CertProvider<C> {
                     _ = tokio::time::sleep(interval) => {}
                 }
                 if let Err(e) = bg_sync.push_from(&bg_dir).await {
-                    tracing::warn!(error = %e, "S3 background sync failed");
+                    tracing::debug!(error = %e, "S3 background sync failed");
                 }
             }
 

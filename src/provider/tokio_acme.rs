@@ -219,7 +219,7 @@ impl CertProvider for TokioAcmeProvider {
                 self.port, e
             ))
         })?;
-        info!("ACME TLS-ALPN-01 listener bound on 0.0.0.0:{}", self.port);
+        tracing::debug!("ACME TLS-ALPN-01 listener bound on 0.0.0.0:{}", self.port);
 
         let stream = ListenerStream { listener };
         let mut tls_incoming = config.incoming(stream, Vec::new());
@@ -232,7 +232,7 @@ impl CertProvider for TokioAcmeProvider {
                 tokio::select! {
                     biased;
                     _ = bg_cancel.cancelled() => {
-                        info!("ACME renewal loop stopped");
+                        tracing::debug!("ACME renewal loop stopped");
                         return;
                     }
                     next = tls_incoming.try_next() => {
@@ -242,11 +242,11 @@ impl CertProvider for TokioAcmeProvider {
                                 // We drop it here; the application TLS server runs on a separate port.
                             }
                             Ok(None) => {
-                                warn!("ACME TLS stream closed unexpectedly");
+                                tracing::debug!("ACME TLS stream closed unexpectedly");
                                 return;
                             }
                             Err(e) => {
-                                warn!("ACME listener error: {}", e);
+                                tracing::debug!("ACME listener error: {}", e);
                             }
                         }
                     }
@@ -270,7 +270,7 @@ impl CertProvider for TokioAcmeProvider {
             ))
         })?;
 
-        info!("ACME certificate ready – files written to {:?}", cert_dir);
+        tracing::info!("ACME certificate ready – files written to {:?}", cert_dir);
         Ok(BackgroundGuard::new(cancel))
     }
 }

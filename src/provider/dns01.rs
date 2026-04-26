@@ -202,7 +202,7 @@ impl DnsProvider for BunnyDns {
                 "bunny.net: add TXT record failed ({status}): {text}"
             )));
         }
-        info!("bunny.net: added TXT {fqdn} = {value}");
+        tracing::debug!("bunny.net: added TXT {fqdn} = {value}");
         Ok(())
     }
 
@@ -244,7 +244,7 @@ impl DnsProvider for BunnyDns {
                         Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
                     })?;
                 if del_resp.status().is_success() {
-                    info!("bunny.net: removed TXT {fqdn} (id={})", record.id);
+                    tracing::debug!("bunny.net: removed TXT {fqdn} (id={})", record.id);
                 } else {
                     let status = del_resp.status();
                     warn!("bunny.net: delete record {} failed ({status})", record.id);
@@ -412,7 +412,7 @@ async fn issue_certificate<D: DnsProvider>(
 
     // Wait for DNS propagation
     if !challenge_info.is_empty() {
-        info!(
+        tracing::debug!(
             "DNS-01: waiting {}s for TXT propagation",
             propagation_secs
         );
@@ -662,7 +662,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
             #[cfg(feature = "s3-sync")]
             if let Some(ref sync) = self.s3_sync {
                 if let Err(e) = sync.push_from(&cert_dir).await {
-                    tracing::warn!(error = %e, "Failed to push ACME credentials to S3");
+                    tracing::debug!(error = %e, "Failed to push ACME credentials to S3");
                 }
             }
 
@@ -686,7 +686,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                     }
                     Err(Error::Challenge(e)) if remaining > 0 => {
                         let delay = self.propagation_secs * (self.max_retries - remaining + 1) as u64;
-                        warn!(
+                        tracing::debug!(
                             "DNS-01 challenge failed ({e}), retrying in {delay}s ({remaining} retries left)"
                         );
                         last_err = Some(Error::Challenge(e));
@@ -703,7 +703,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                 return Err(e);
             }
         } else {
-            info!("Existing cert files found in {:?}", cert_dir);
+            tracing::debug!("Existing cert files found in {:?}", cert_dir);
         }
 
         // Spawn background renewal task
@@ -717,6 +717,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
         let production = self.production;
         let propagation_secs = self.propagation_secs;
         let bg_renew_within = Duration::from_secs(self.renew_within_days * 86400);
+        let bg_s3_sync = self.s3_sync.clone();
 
         tokio::spawn(async move {
             let mut retry_delay = Duration::from_secs(3600);
@@ -735,7 +736,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                             .unwrap_or(Duration::ZERO)
                     }
                     Err(e) => {
-                        warn!("Failed to read cert expiry: {e}, retrying in {:?}", retry_delay);
+                        tracing::debug!("Failed to read cert expiry: {e}, retrying in {:?}", retry_delay);
                         let d = retry_delay;
                         retry_delay = (retry_delay * 2).min(Duration::from_secs(86400));
                         d
@@ -746,7 +747,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                 tokio::select! {
                     biased;
                     _ = bg_cancel.cancelled() => {
-                        info!("DNS-01 renewal loop stopped");
+                        tracing::debug!("DNS-01 renewal loop stopped");
                         return;
                     }
                     _ = sleep(sleep_until) => {}
@@ -756,7 +757,7 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                 let account = match load_or_create_account(&bg_cache_dir, &contact_email, production).await {
                     Ok(a) => a,
                     Err(e) => {
-                        warn!("Renewal: account load failed ({e}), retrying in {:?}", retry_delay);
+                        tracing::debug!("Renewal: account load failed ({e}), retrying in {:?}", retry_delay);
                         tokio::select! {
                             biased;
                             _ = bg_cancel.cancelled() => return,
@@ -770,11 +771,18 @@ impl<D: DnsProvider> CertProvider for DnsAcmeProvider<D> {
                 // Attempt renewal
                 match issue_certificate(&dns, &account, &bg_domains, propagation_secs, &bg_cert_dir).await {
                     Ok(()) => {
-                        info!("DNS-01 certificate renewed successfully");
+                        tracing::debug!("DNS-01 certificate renewed successfully");
                         retry_delay = Duration::from_secs(3600);
+                        // Push renewed certs to S3 immediately
+                        #[cfg(feature = "s3-sync")]
+                        if let Some(ref sync) = bg_s3_sync {
+                            if let Err(e) = sync.push_from(&bg_cert_dir).await {
+                                tracing::debug!(error = %e, "Failed to push renewed certificate to S3");
+                            }
+                        }
                     }
                     Err(e) => {
-                        warn!("Renewal failed: {e}, retrying in {:?}", retry_delay);
+                        tracing::debug!("Renewal failed: {e}, retrying in {:?}", retry_delay);
                         tokio::select! {
                             biased;
                             _ = bg_cancel.cancelled() => return,

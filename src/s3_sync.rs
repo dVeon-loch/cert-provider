@@ -35,6 +35,12 @@ pub struct S3CertSync {
     config: S3Config,
 }
 
+#[derive(Debug, Default)]
+pub struct PullResult {
+    pub fullchain_found: bool,
+    pub privkey_found: bool,
+}
+
 impl S3CertSync {
     pub fn new(config: S3Config) -> Result<Self> {
         let bucket = Self::create_bucket(&config)?;
@@ -80,12 +86,13 @@ impl S3CertSync {
         }
     }
 
-    pub async fn pull_to(&self, cert_dir: &Path) -> Result<()> {
+    pub async fn pull_to(&self, cert_dir: &Path) -> Result<PullResult> {
         let filenames = [
             "fullchain.pem",
             "privkey.pem",
             "acme_cache/acme_account_credentials.json",
         ];
+        let mut result = PullResult::default();
         for name in &filenames {
             let s3_key = self.s3_key(name);
             match self.bucket.get_object(&s3_key).await {
@@ -95,14 +102,19 @@ impl S3CertSync {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                     tokio::fs::write(&path, content.to_vec()).await?;
-                    tracing::info!(path = %path.display(), "Downloaded cert file from S3");
+                    tracing::debug!(path = %path.display(), "Downloaded cert file from S3");
+                    if name == "fullchain.pem" {
+                        result.fullchain_found = true;
+                    } else if name == "privkey.pem" {
+                        result.privkey_found = true;
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(key = %s3_key, error = %e, "Cert file not found in S3");
                 }
             }
         }
-        Ok(())
+        Ok(result)
     }
 
     pub async fn push_from(&self, cert_dir: &Path) -> Result<()> {
@@ -120,8 +132,22 @@ impl S3CertSync {
             let content = tokio::fs::read(&path).await?;
             let s3_key = self.s3_key(name);
             self.bucket.put_object(&s3_key, &content).await?;
-            tracing::info!(key = %s3_key, "Uploaded cert file to S3");
+            tracing::debug!(key = %s3_key, "Uploaded cert file to S3");
         }
+        Ok(())
+    }
+
+    pub async fn push_credentials_only(&self, cert_dir: &Path) -> Result<()> {
+        let filename = "acme_cache/acme_account_credentials.json";
+        let path = cert_dir.join(filename);
+        if !path.exists() {
+            tracing::debug!(path = %path.display(), "Skipping credentials push — file does not exist");
+            return Ok(());
+        }
+        let content = tokio::fs::read(&path).await?;
+        let s3_key = self.s3_key(filename);
+        self.bucket.put_object(&s3_key, &content).await?;
+        tracing::debug!(key = %s3_key, "Uploaded ACME credentials to S3");
         Ok(())
     }
 
@@ -138,7 +164,7 @@ impl S3CertSync {
                 tokio::select! {
                     biased;
                     _ = bg_cancel.cancelled() => {
-                        tracing::info!("S3 background sync stopped");
+                        tracing::debug!("S3 background sync stopped");
                         return;
                     }
                     _ = tokio::time::sleep(interval) => {}
